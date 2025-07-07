@@ -1,0 +1,12 @@
+# secrets
+.env
+config.json
+
+# state data
+data/state.json
+data/state_main.json
+
+# editor files
+__pycache__/
+*.pyc
+.vscode/
