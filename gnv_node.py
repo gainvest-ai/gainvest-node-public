@@ -1,12 +1,18 @@
 import json, time, hashlib, os
+from google.cloud import firestore
 
 REAL_MODE = os.getenv("GNV_REAL", "false") == "true"
-STATE_FILE = "data/state_main.json" if REAL_MODE else "data/state.json"
+NETWORK_ID = "mainnet" if REAL_MODE else "testnet"
+
 GENESIS_FILE = "genesis.json"
 
 REWARD_START = 1_000_000
 REWARD_END = 10
-REWARD_DURATION = 365 * 24 * 60 * 60  # 1 year in seconds
+REWARD_DURATION = 365 * 24 * 60 * 60  # 1 year
+
+# Init Firestore
+db = firestore.Client()
+COLLECTION = "gnv-ledger"
 
 def load_genesis_time():
     if os.path.exists(GENESIS_FILE):
@@ -20,15 +26,13 @@ def load_genesis_time():
 GENESIS_TIME = load_genesis_time()
 
 def load_state():
-    try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"height": 0, "chain": [], "balances": {}, "supply": 0, "votes": []}
+    doc = db.collection(COLLECTION).document(NETWORK_ID).get()
+    if doc.exists:
+        return doc.to_dict()
+    return {"height": 0, "chain": [], "balances": {}, "supply": 0, "votes": []}
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    db.collection(COLLECTION).document(NETWORK_ID).set(state)
 
 def create_block(txns):
     state = load_state()
@@ -44,8 +48,6 @@ def create_block(txns):
     save_state(state)
     return block
 
-
-
 def compute_reward(score):
     now = time.time()
     elapsed = min(now - GENESIS_TIME, REWARD_DURATION)
@@ -57,10 +59,8 @@ def compute_reward(score):
     miner = reward - burn - dev
     return miner, burn, dev
 
-
 if __name__ == "__main__":
-    print("✅ GNV mainnet node running.")
-    print(f"📂 Using state file: {STATE_FILE}")
+    print(f"✅ GNV {NETWORK_ID} node running with Firestore-backed ledger.")
     print(f"🌱 Genesis time: {GENESIS_TIME}")
     print("⛏️  Awaiting block creation via gnv_api.py...")
     while True:

@@ -1,5 +1,9 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from google.cloud import firestore
+
+db = firestore.Client(project="gainvest-6ed7e")
+
 
 app = Flask(__name__)
 CORS(app)  # <- enable CORS before defining routes
@@ -63,7 +67,7 @@ def mine():
         return jsonify({"error": "Missing or invalid prompt"}), 400
 
     try:
-        model_url = "http://localhost:5000/predictions/gnv-model"
+        model_url = "https://b41aad4e4811.ngrok-free.app/predictions/gnv-model"
         payload = {"text": prompt}
         model_response = requests.post(
             model_url,
@@ -115,7 +119,12 @@ def mine():
         }
     }
     block = create_block([txn])
+    state["chain"].append(block)
+
     save_state(state)
+
+    db.collection("gnv-ledger").document("mainnet").set(state)
+
 
     return jsonify({
         "block": block,
@@ -163,6 +172,95 @@ def transfer():
         "amount": amount
     })
 
+@app.route("/state", methods=["GET"])
+def state():
+    return jsonify(load_state())
+
+@app.route("/dao/vote", methods=["POST"])
+def vote():
+    data = request.get_json()
+    user = data["wallet"]
+    vote = data["vote"]
+
+    dao = load_json(DAO_FILE, {"proposals": [], "votes": []})
+    dao["votes"].append({"id": str(uuid.uuid4()), "user": user, "vote": vote, "time": time.time()})
+    save_json(DAO_FILE, dao)
+    return jsonify({"status": "vote recorded"})
+
+@app.route("/dao/report", methods=["POST"])
+def report():
+    data = request.get_json()
+    reporter = data.get("wallet")
+    target = data.get("target")
+    reason = data.get("reason")
+
+    dao = load_json(DAO_FILE, {"proposals": [], "votes": []})
+    proposal = {
+        "id": str(uuid.uuid4()),
+        "target": target,
+        "action": "slash",
+        "reason": reason,
+        "proposed_by": reporter,
+        "time": time.time(),
+        "votes": []
+    }
+    dao["proposals"].append(proposal)
+    save_json(DAO_FILE, dao)
+    return jsonify({"status": "proposal submitted", "proposal": proposal})
+
+
+@app.route("/dao/proposals", methods=["GET"])
+def proposals():
+    dao = load_json(DAO_FILE, {"proposals": [], "votes": []})
+    return jsonify(dao.get("proposals", []))
+
+@app.route("/dao/register_model", methods=["POST"])
+def register_model():
+    data = request.get_json()
+    user = data.get("wallet")
+    model_id = data.get("model")
+
+    state = load_state()
+    if state["balances"].get(user, 0) < STAKE_REQUIREMENT:
+        return jsonify({"error": "insufficient GNV to stake"}), 400
+
+    state["balances"][user] -= STAKE_REQUIREMENT
+    registry = load_json(REGISTRY_FILE, {"models": {}})
+    registry["models"][model_id] = {"owner": user, "stake": STAKE_REQUIREMENT, "active": True}
+    save_json(REGISTRY_FILE, registry)
+    save_state(state)
+    db.collection("gnv-ledger").document("mainnet").set(state)
+
+    return jsonify({"status": "model registered", "model": model_id})
+
+@app.route("/dao/tally_votes", methods=["POST"])
+def tally_votes():
+    dao = load_json(DAO_FILE, {"proposals": [], "votes": []})
+    registry = load_json(REGISTRY_FILE, {"models": {}})
+    state = load_state()
+
+    for proposal in dao["proposals"]:
+        if proposal.get("resolved"):
+            continue
+        proposal_id = proposal["id"]
+        proposal_votes = [v for v in dao["votes"] if v["vote"].get("proposal_id") == proposal_id]
+        unique_voters = set(v["user"] for v in proposal_votes)
+        if len(unique_voters) / max(1, len(state["balances"])) > VOTE_THRESHOLD:
+            target = proposal["target"]
+            model = registry["models"].get(target)
+            if model and model["active"]:
+                model["active"] = False
+                state["supply"] -= model["stake"]
+                del registry["models"][target]
+                proposal["resolved"] = True
+
+    save_json(DAO_FILE, dao)
+    save_json(REGISTRY_FILE, registry)
+    save_state(state)
+    db.collection("gnv-ledger").document("mainnet").set(state)
+
+    return jsonify({"status": "tally complete"})
+
 @app.route("/balance/<wallet>", methods=["GET"])
 def balance(wallet):
     state = load_state()
@@ -201,12 +299,13 @@ def faucet():
     }])
 
     save_state(state)
+    db.collection("gnv-ledger").document("mainnet").set(state)
 
     return jsonify({"status": "success", "wallet": wallet, "amount": 10_000_000, "block": block})
 
 @app.route("/status")
 def status():
-    return jsonify({"status": "ok", "chain": "gnv-testnet"})
+    return jsonify({"status": "ok", "chain": "gnv-mainnet"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
